@@ -1,0 +1,331 @@
+CLASS_NAMES: ['Car']
+
+DATA_CONFIG:
+  _BASE_CONFIG_: cfgs/dataset_configs/lyft_kitti_format_dataset.yaml
+  DATASET: 'KittiFusionDataset'
+  FAKE_BOX_PATH: '/home2/dgy/project/pytorch/opendet3d/output/lyft_models/fusion_rcnn_base_lyft_anchor_st/save_preds_lyftanchor_e69_pt2/eval/epoch_69/train/default/predict.pkl'
+  DATA_AUGMENTOR:
+    AUGMENTOR: 'FusionAugmentor'
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST: []
+  POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z'],
+    src_feature_list: ['x', 'y', 'z', 'intensity'],
+  }
+
+  PROCESSOR: 'FusionProcessor'
+  DATA_PROCESSOR:
+#    Because of numerical stability,
+#    resize_image is better placed in front of mask_points_and_boxes_outside_range
+      - NAME: resize_image
+        TARGET_SHAPE: [736, 1088]
+
+      - NAME: normalize_image
+        MEAN:
+          - 103.53
+          - 116.28
+          - 123.675
+        STD:
+          - 1.0
+          - 1.0
+          - 1.0
+
+      - NAME: mask_points_and_boxes_outside_range
+        REMOVE_OUTSIDE_BOXES: True
+
+      - NAME: sample_points
+        NUM_POINTS: {
+          'train': 16384,
+          'test': 16384
+        }
+
+      - NAME: shuffle_points
+        SHUFFLE_ENABLED: {
+          'train': True,
+          'test': False
+        }
+
+MODEL:
+  NAME: FusionRCNN
+
+  FREEZE_IMAGE_BRANCH: False
+  IMAGE_BRANCH_WEIGHT: ''
+
+  #  IMAGE_BRANCH_WEIGHT: ../ckpts/model_fpn50_cityscapes_seg.pkl
+  IMAGE_PRETRAINED_DATASET: cityscapes
+
+  SELF_TRAINING: True
+
+
+  BACKBONE_IMAGE:
+    NAME: build_resnet_fpn_backbone
+    FREEZE: False
+    RESNETS:
+      IN_CHANNELS: 3
+      NORM: 'BN'
+#      NORM: 'FrozenBN'
+      FREEZE_AT: 0
+      OUT_FEATURES: ['res2', 'res3', 'res4', 'res5']
+      DEPTH: 50
+      NUM_GROUPS: 1
+      WIDTH_PER_GROUP: 64
+      STEM_OUT_CHANNELS: 64
+      RES2_OUT_CHANNELS: 256
+      STRIDE_IN_1X1: True
+      RES5_DILATION: 1
+      DEFORM_ON_PER_STAGE: [False, False, False, False]
+      DEFORM_MODULATED: False
+      DEFORM_NUM_GROUPS: 1
+
+    FPN:
+      IN_FEATURES: ['res2', 'res3', 'res4', 'res5']
+      OUT_CHANNELS: 256
+      NORM: ''
+      FUSE_TYPE: 'sum'
+
+  BACKBONE_3D:
+    NAME: PointNet2MSG
+    PWG_CONFIG:
+      IMAGE_CHANNELS_BU: [256, 512, 1024, 2048]
+      IMAGE_FEATURES_BU: ['res2', 'res3', 'res4', 'res5']
+      SPECIFIED_ATT_BU: [Identity, Identity, Identity, Identity]
+      IMAGE_CHANNELS_TD: [256, 256, 256, 256]
+      IMAGE_FEATURES_TD: ['p5', 'p4', 'p3', 'p2']
+      SPECIFIED_ATT_TD: [Identity, Identity, Identity, Identity]
+      REDUCTION: 16
+
+
+    SA_CONFIG:
+      NPOINTS: [4096, 1024, 256, 64]
+      RADIUS: [[0.1, 0.5], [0.5, 1.0], [1.0, 2.0], [2.0, 4.0]]
+      NSAMPLE: [[16, 32], [16, 32], [16, 32], [16, 32]]
+      MLPS: [[[16, 16, 32], [32, 32, 64]],
+             [[64, 64, 128], [64, 96, 128]],
+             [[128, 196, 256], [128, 196, 256]],
+             [[256, 256, 512], [256, 384, 512]]]
+    FP_MLPS: [[128, 128], [256, 256], [512, 512], [512, 512]]
+
+  POINT_HEAD:
+    NAME: PointHeadBox
+    CLS_FC: [256, 256]
+    REG_FC: [256, 256]
+    CLASS_AGNOSTIC: False
+    USE_POINT_FEATURES_BEFORE_FUSION: False
+    TARGET_CONFIG:
+      GT_EXTRA_WIDTH: [0.2, 0.2, 0.2]
+      BOX_CODER: PointResidualCoder
+      BOX_CODER_CONFIG: {
+        'use_mean_size': True,
+        'mean_size': [
+        [4.76, 1.9, 1.76],
+        [0.98, 0.71, 1.95],
+        [2.15, 0.71, 1.95]
+        ]
+      }
+
+    LOSS_CONFIG:
+      LOSS_REG: WeightedSmoothL1Loss
+      LOSS_WEIGHTS: {
+        'point_cls_weight': 1.0,
+        'point_box_weight': 1.0,
+        'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      }
+
+
+
+  ROI_HEAD:
+    NAME: FusionRCNNHead
+
+    # IMAGE BRANCH
+    TRAIN_IMAGE_BOXHEAD: True
+    VIS_PERIOD: 0
+    MASK_ON: False
+    IMAGE_ROI_NAME: 'StandardROIHeads'
+    BATCH_SIZE_PER_IMAGE: 512
+    POSITIVE_FRACTION: 0.25
+    PROPOSAL_APPEND_GT: True
+    IOU_THRESHOLDS: [0.5]
+    IOU_LABELS: [0, 1]
+    IN_FEATURES: ['p2', 'p3', 'p4', 'p5']
+    SCORE_THRESH_TEST: 0.05
+    NMS_THRESH_TEST: 0.5
+    DETECTIONS_PER_IMAGE_TEST: 100
+    BBOX_REG_LOSS_TYPE: 'smooth_l1'
+    BBOX_REG_LOSS_WEIGHT: 1.0
+
+    IMAGE_PROPOSAL_GENERATOR:
+#      NAME: PrecomputedProposals
+      NAME: RPN
+      IN_FEATURES: ["p2", "p3", "p4", "p5", "p6"]
+
+      NMS_THRESH: 0.6
+      MIN_BOX_SIZE: 0
+      BATCH_SIZE_PER_IMAGE: 256
+      POSITIVE_FRACTION: 0.5
+      LOSS_WEIGHT: 1.0
+      BBOX_REG_LOSS_WEIGHT: 1.0
+      BOUNDARY_THRESH: -1
+      BBOX_REG_WEIGHTS: [1.0, 1.0, 1.0, 1.0]
+      BBOX_REG_LOSS_TYPE: 'smooth_l1'
+      SMOOTH_L1_BETA: 0
+      IOU_LABELS: [0, -1, 1]
+      IOU_THRESHOLDS: [0.3, 0.7]
+
+      PRE_NMS_TOPK_TRAIN: 2000  # Per FPN level
+      PRE_NMS_TOPK_TEST: 2000  # Per FPN level
+
+      POST_NMS_TOPK_TRAIN: 1000
+      POST_NMS_TOPK_TEST: 1000
+
+      RPN_HEAD:
+        NAME: StandardRPNHead
+
+      ANCHOR_GENERATOR:
+        NAME: DefaultAnchorGenerator
+        SIZES: [[32], [64], [128], [256], [512]]
+        ASPECT_RATIOS: [[0.5, 1.0, 2.0]]
+        OFFSET: 0.0
+
+
+
+
+    ROI_BOX_HEAD:
+      NAME: 'FastRCNNConvFCHead'
+      TRAIN_ON_PRED_BOXES: False
+      POOLER_RESOLUTION: 7
+      POOLER_SAMPLING_RATIO: 0
+      POOLER_TYPE: 'ROIAlignV2'
+      BBOX_REG_WEIGHTS: [10.0, 10.0, 5.0, 5.0]
+
+      # FastRCNNConvFCHead
+      NUM_CONV: 0
+      CONV_DIM: 256
+      NUM_FC: 2
+      FC_DIM: 1024
+      NORM: ''
+      CLS_AGNOSTIC_BBOX_REG: False
+      SMOOTH_L1_BETA: 0.0
+      BBOX_REG_LOSS_TYPE: 'smooth_l1'
+      BBOX_REG_LOSS_WEIGHT: 1.0
+
+
+
+
+    ROI_MASK_HEAD:
+      NAME: MaskRCNNConvUpsampleHead
+      POOLER_RESOLUTION: 14
+      POOLER_SAMPLING_RATIO: 0
+      NUM_CONV: 4
+      CONV_DIM: 256
+      NORM: ''
+      CLS_AGNOSTIC_MASK: False
+      POOLER_TYPE: ROIAlignV2
+
+    # POINT BRANCH
+
+    CLASS_AGNOSTIC: True
+
+    ROI_POINT_POOL:
+      POOL_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+      NUM_SAMPLED_POINTS: 512
+      DEPTH_NORMALIZER: 70.0
+
+    XYZ_UP_LAYER: [128, 128]
+    CLS_FC: [256, 256]
+    REG_FC: [256, 256]
+    DP_RATIO: 0.0
+    USE_BN: False
+
+    SA_CONFIG:
+      NPOINTS: [128, 32, -1]
+      RADIUS: [0.2, 0.4, 100]
+      NSAMPLE: [16, 16, 16]
+      MLPS: [[128, 128, 128],
+             [128, 128, 256],
+             [256, 256, 512]]
+
+    NMS_CONFIG:
+      TRAIN:
+        NMS_TYPE: nms_gpu
+        MULTI_CLASSES_NMS: False
+        NMS_PRE_MAXSIZE: 9000
+        NMS_POST_MAXSIZE: 512
+        NMS_THRESH: 0.8
+      TEST:
+        NMS_TYPE: nms_gpu
+        MULTI_CLASSES_NMS: False
+        NMS_PRE_MAXSIZE: 9000
+        NMS_POST_MAXSIZE: 256
+        NMS_THRESH: 0.8
+
+    TARGET_CONFIG:
+      BOX_CODER: ResidualCoder
+      ROI_PER_IMAGE: 128
+      FG_RATIO: 0.5
+
+#      SAMPLE_ROI_BY_EACH_CLASS: True
+      SAMPLE_ROI_BY_EACH_CLASS: False
+      CLS_SCORE_TYPE: cls
+
+      CLS_FG_THRESH: 0.6
+      CLS_BG_THRESH: 0.45
+      CLS_BG_THRESH_LO: 0.1
+      HARD_BG_RATIO: 0.8
+
+      REG_FG_THRESH: 0.55
+
+    LOSS_CONFIG:
+      CLS_LOSS: BinaryCrossEntropy
+      REG_LOSS: smooth-l1
+      CORNER_LOSS_REGULARIZATION: True
+      LOSS_WEIGHTS: {
+        'rcnn_cls_weight': 1.0,
+        'rcnn_reg_weight': 1.0,
+        'rcnn_corner_weight': 1.0,
+        'code_weights': [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+      }
+
+  POST_PROCESSING:
+    FUSION: False
+    STRATEGY: 6
+    CLS_THRESH_2D: 0.7
+    CLS_THRESH_3D: 0.7
+    IOU_THRESH: 0.3
+    RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
+    SCORE_THRESH: 0.1
+    OUTPUT_RAW_SCORE: False
+
+    EVAL_METRIC: kitti
+
+    NMS_CONFIG:
+      MULTI_CLASSES_NMS: False
+      NMS_TYPE: nms_gpu
+      NMS_THRESH: 0.1
+      NMS_PRE_MAXSIZE: 4096
+      NMS_POST_MAXSIZE: 500
+
+
+OPTIMIZATION:
+  BATCH_SIZE_PER_GPU: 2
+  NUM_EPOCHS: 80
+
+  OPTIMIZER: sgd
+  LR: 0.005
+  WEIGHT_DECAY: 0.0001
+  MOMENTUM: 0.9
+
+  MOMS: [0.95, 0.85]
+  PCT_START: 0.4
+  DIV_FACTOR: 10
+  DECAY_STEP_LIST: [35, 45]
+  LR_DECAY: 0.1
+  LR_CLIP: 0.0000001
+
+  LR_WARMUP: False
+  WARMUP_EPOCH: 1
+
+  GRAD_NORM_CLIP: 10
+
+
+DEBUG: False
